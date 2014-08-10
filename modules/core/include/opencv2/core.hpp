@@ -240,7 +240,7 @@ CV_EXPORTS_W void batchDistance(InputArray src1, InputArray src2,
                                 bool crosscheck = false);
 
 //! scales and shifts array elements so that either the specified norm (alpha) or the minimum (alpha) and maximum (beta) array values get the specified values
-CV_EXPORTS_W void normalize( InputArray src, OutputArray dst, double alpha = 1, double beta = 0,
+CV_EXPORTS_W void normalize( InputArray src, InputOutputArray dst, double alpha = 1, double beta = 0,
                              int norm_type = NORM_L2, int dtype = -1, InputArray mask = noArray());
 
 //! scales and shifts array elements so that either the specified norm (alpha) or the minimum (alpha) and maximum (beta) array values get the specified values
@@ -389,7 +389,7 @@ CV_EXPORTS_W void patchNaNs(InputOutputArray a, double val = 0);
 
 //! implements generalized matrix product algorithm GEMM from BLAS
 CV_EXPORTS_W void gemm(InputArray src1, InputArray src2, double alpha,
-                       InputArray src3, double gamma, OutputArray dst, int flags = 0);
+                       InputArray src3, double beta, OutputArray dst, int flags = 0);
 
 //! multiplies matrix by its transposition from the left or from the right
 CV_EXPORTS_W void mulTransposed( InputArray src, OutputArray dst, bool aTa,
@@ -509,6 +509,10 @@ CV_EXPORTS_W void randShuffle(InputOutputArray dst, double iterFactor = 1., RNG*
 //! draws the line segment (pt1, pt2) in the image
 CV_EXPORTS_W void line(InputOutputArray img, Point pt1, Point pt2, const Scalar& color,
                      int thickness = 1, int lineType = LINE_8, int shift = 0);
+
+//! draws an arrow from pt1 to pt2 in the image
+CV_EXPORTS_W void arrowedLine(InputOutputArray img, Point pt1, Point pt2, const Scalar& color,
+                     int thickness=1, int line_type=8, int shift=0, double tipLength=0.1);
 
 //! draws the rectangle outline or a solid rectangle with the opposite corners pt1 and pt2 in the image
 CV_EXPORTS_W void rectangle(InputOutputArray img, Point pt1, Point pt2,
@@ -686,7 +690,61 @@ public:
     Mat mean; //!< mean value subtracted before the projection and added after the back projection
 };
 
+// Linear Discriminant Analysis
+class CV_EXPORTS LDA
+{
+public:
+    // Initializes a LDA with num_components (default 0) and specifies how
+    // samples are aligned (default dataAsRow=true).
+    explicit LDA(int num_components = 0);
 
+    // Initializes and performs a Discriminant Analysis with Fisher's
+    // Optimization Criterion on given data in src and corresponding labels
+    // in labels. If 0 (or less) number of components are given, they are
+    // automatically determined for given data in computation.
+    LDA(InputArrayOfArrays src, InputArray labels, int num_components = 0);
+
+    // Serializes this object to a given filename.
+    void save(const String& filename) const;
+
+    // Deserializes this object from a given filename.
+    void load(const String& filename);
+
+    // Serializes this object to a given cv::FileStorage.
+    void save(FileStorage& fs) const;
+
+        // Deserializes this object from a given cv::FileStorage.
+    void load(const FileStorage& node);
+
+    // Destructor.
+    ~LDA();
+
+    //! Compute the discriminants for data in src and labels.
+    void compute(InputArrayOfArrays src, InputArray labels);
+
+    // Projects samples into the LDA subspace.
+    Mat project(InputArray src);
+
+    // Reconstructs projections from the LDA subspace.
+    Mat reconstruct(InputArray src);
+
+    // Returns the eigenvectors of this LDA.
+    Mat eigenvectors() const { return _eigenvectors; }
+
+    // Returns the eigenvalues of this LDA.
+    Mat eigenvalues() const { return _eigenvalues; }
+
+    static Mat subspaceProject(InputArray W, InputArray mean, InputArray src);
+    static Mat subspaceReconstruct(InputArray W, InputArray mean, InputArray src);
+
+protected:
+    bool _dataAsRow;
+    int _num_components;
+    Mat _eigenvectors;
+    Mat _eigenvalues;
+
+    void lda(InputArrayOfArrays src, InputArray labels);
+};
 
 /*!
     Singular Value Decomposition class
@@ -953,12 +1011,12 @@ public:
 class CV_EXPORTS Formatter
 {
 public:
-    enum { FMT_MATLAB  = 0,
-           FMT_CSV     = 1,
-           FMT_PYTHON  = 2,
-           FMT_NUMPY   = 3,
-           FMT_C       = 4,
-           FMT_DEFAULT = FMT_MATLAB
+    enum { FMT_DEFAULT = 0,
+           FMT_MATLAB  = 1,
+           FMT_CSV     = 2,
+           FMT_PYTHON  = 3,
+           FMT_NUMPY   = 4,
+           FMT_C       = 5
          };
 
     virtual ~Formatter();

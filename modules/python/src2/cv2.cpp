@@ -9,32 +9,15 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/ndarrayobject.h>
 
-#include "opencv2/core.hpp"
-#include "opencv2/core/utility.hpp"
-#include "opencv2/contrib.hpp"
-#include "opencv2/flann/miniflann.hpp"
-#include "opencv2/imgproc.hpp"
-#include "opencv2/calib3d.hpp"
-#include "opencv2/features2d.hpp"
-#include "opencv2/objdetect.hpp"
-#include "opencv2/softcascade.hpp"
-#include "opencv2/video.hpp"
-#include "opencv2/photo.hpp"
-#include "opencv2/highgui.hpp"
-
-#include "opencv2/ml.hpp"
+#include "pyopencv_generated_include.h"
+#include "opencv2/core/types_c.h"
 
 #include "opencv2/opencv_modules.hpp"
-#ifdef HAVE_OPENCV_NONFREE
-#  include "opencv2/nonfree.hpp"
-#endif
 
 #include "opencv2/edge_filter.hpp"
 
 #include "pycompat.hpp"
 
-using cv::flann::IndexParams;
-using cv::flann::SearchParams;
 
 static PyObject* opencv_error = 0;
 
@@ -102,7 +85,8 @@ catch (const cv::Exception &e) \
 }
 
 using namespace cv;
-typedef cv::softcascade::ChannelFeatureBuilder softcascade_ChannelFeatureBuilder;
+using cv::flann::IndexParams;
+using cv::flann::SearchParams;
 
 typedef std::vector<uchar> vector_uchar;
 typedef std::vector<char> vector_char;
@@ -121,6 +105,7 @@ typedef std::vector<KeyPoint> vector_KeyPoint;
 typedef std::vector<Mat> vector_Mat;
 typedef std::vector<DMatch> vector_DMatch;
 typedef std::vector<String> vector_String;
+typedef std::vector<Scalar> vector_Scalar;
 
 typedef std::vector<std::vector<char> > vector_vector_char;
 typedef std::vector<std::vector<Point> > vector_vector_Point;
@@ -128,47 +113,11 @@ typedef std::vector<std::vector<Point2f> > vector_vector_Point2f;
 typedef std::vector<std::vector<Point3f> > vector_vector_Point3f;
 typedef std::vector<std::vector<DMatch> > vector_vector_DMatch;
 
-typedef Ptr<Algorithm> Ptr_Algorithm;
-typedef Ptr<FeatureDetector> Ptr_FeatureDetector;
-typedef Ptr<DescriptorExtractor> Ptr_DescriptorExtractor;
-typedef Ptr<Feature2D> Ptr_Feature2D;
-typedef Ptr<DescriptorMatcher> Ptr_DescriptorMatcher;
-typedef Ptr<BackgroundSubtractor> Ptr_BackgroundSubtractor;
-typedef Ptr<BackgroundSubtractorMOG> Ptr_BackgroundSubtractorMOG;
-typedef Ptr<BackgroundSubtractorMOG2> Ptr_BackgroundSubtractorMOG2;
-typedef Ptr<BackgroundSubtractorKNN> Ptr_BackgroundSubtractorKNN;
-typedef Ptr<BackgroundSubtractorGMG> Ptr_BackgroundSubtractorGMG;
-
-typedef Ptr<StereoMatcher> Ptr_StereoMatcher;
-typedef Ptr<StereoBM> Ptr_StereoBM;
-typedef Ptr<StereoSGBM> Ptr_StereoSGBM;
-
-typedef Ptr<Tonemap> Ptr_Tonemap;
-typedef Ptr<TonemapDrago> Ptr_TonemapDrago;
-typedef Ptr<TonemapReinhard> Ptr_TonemapReinhard;
-typedef Ptr<TonemapDurand> Ptr_TonemapDurand;
-typedef Ptr<TonemapMantiuk> Ptr_TonemapMantiuk;
-typedef Ptr<AlignMTB> Ptr_AlignMTB;
-typedef Ptr<CalibrateDebevec> Ptr_CalibrateDebevec;
-typedef Ptr<CalibrateRobertson> Ptr_CalibrateRobertson;
-typedef Ptr<MergeDebevec> Ptr_MergeDebevec;
-typedef Ptr<MergeRobertson> Ptr_MergeRobertson;
-typedef Ptr<MergeMertens> Ptr_MergeMertens;
-typedef Ptr<MergeRobertson> Ptr_MergeRobertson;
-
-typedef Ptr<cv::softcascade::ChannelFeatureBuilder> Ptr_ChannelFeatureBuilder;
-typedef Ptr<CLAHE> Ptr_CLAHE;
-typedef Ptr<LineSegmentDetector > Ptr_LineSegmentDetector;
-
 typedef SimpleBlobDetector::Params SimpleBlobDetector_Params;
 
 typedef cvflann::flann_distance_t cvflann_flann_distance_t;
 typedef cvflann::flann_algorithm_t cvflann_flann_algorithm_t;
-typedef Ptr<flann::IndexParams> Ptr_flann_IndexParams;
-typedef Ptr<flann::SearchParams> Ptr_flann_SearchParams;
 
-typedef Ptr<FaceRecognizer> Ptr_FaceRecognizer;
-typedef std::vector<Scalar> vector_Scalar;
 
 typedef Ptr<AdaptiveManifoldFilter> Ptr_AdaptiveManifoldFilter;
 typedef Ptr<DTFilterBase> Ptr_DTFilterBase;
@@ -430,6 +379,12 @@ static bool pyopencv_to(PyObject* o, Mat& m, const ArgInfo info)
     m.allocator = &g_numpyAllocator;
 
     return true;
+}
+
+template<>
+bool pyopencv_to(PyObject* o, Mat& m, const char* name)
+{
+    return pyopencv_to(o, m, ArgInfo(name, 0));
 }
 
 template<>
@@ -1053,19 +1008,18 @@ template<>
 bool pyopencv_to(PyObject *o, cv::flann::IndexParams& p, const char *name)
 {
     (void)name;
-    bool ok = false;
-    PyObject* keys = PyObject_CallMethod(o,(char*)"keys",0);
-    PyObject* values = PyObject_CallMethod(o,(char*)"values",0);
+    bool ok = true;
+    PyObject* key = NULL;
+    PyObject* item = NULL;
+    Py_ssize_t pos = 0;
 
-    if( keys && values )
-    {
-        int i, n = (int)PyList_GET_SIZE(keys);
-        for( i = 0; i < n; i++ )
-        {
-            PyObject* key = PyList_GET_ITEM(keys, i);
-            PyObject* item = PyList_GET_ITEM(values, i);
-            if( !PyString_Check(key) )
+    if(PyDict_Check(o)) {
+        while(PyDict_Next(o, &pos, &key, &item)) {
+            if( !PyString_Check(key) ) {
+                ok = false;
                 break;
+            }
+
             String k = PyString_AsString(key);
             if( PyString_Check(item) )
             {
@@ -1088,14 +1042,14 @@ bool pyopencv_to(PyObject *o, cv::flann::IndexParams& p, const char *name)
                 p.setDouble(k, value);
             }
             else
+            {
+                ok = false;
                 break;
+            }
         }
-        ok = i == n && !PyErr_Occurred();
     }
 
-    Py_XDECREF(keys);
-    Py_XDECREF(values);
-    return ok;
+    return ok && !PyErr_Occurred();
 }
 
 template<>
@@ -1145,14 +1099,6 @@ bool pyopencv_to(PyObject* obj, CvSlice& r, const char* name)
         return true;
     }
     return PyArg_ParseTuple(obj, "ii", &r.start_index, &r.end_index) > 0;
-}
-
-template<>
-PyObject* pyopencv_from(CvDTreeNode* const & node)
-{
-    double value = node->value;
-    int ivalue = cvRound(value);
-    return value == ivalue ? PyInt_FromLong(ivalue) : PyFloat_FromDouble(value);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

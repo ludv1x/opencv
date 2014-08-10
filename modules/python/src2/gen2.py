@@ -267,7 +267,7 @@ class ClassInfo(object):
                 #return sys.exit(-1)
             if self.bases and self.bases[0].startswith("cv::"):
                 self.bases[0] = self.bases[0][4:]
-            if self.bases and self.bases[0] == "Algorithm":
+            if self.bases and self.bases[0] == "cv::Algorithm":
                 self.isalgorithm = True
             for m in decl[2]:
                 if m.startswith("="):
@@ -286,7 +286,7 @@ class ClassInfo(object):
         code = "static bool pyopencv_to(PyObject* src, %s& dst, const char* name)\n{\n    PyObject* tmp;\n    bool ok;\n" % (self.cname)
         code += "".join([gen_template_set_prop_from_map.substitute(propname=p.name,proptype=p.tp) for p in self.props])
         if self.bases:
-            code += "\n    return pyopencv_to(src, (%s&)dst, name);\n}\n" % all_classes[self.bases[0]].cname
+            code += "\n    return pyopencv_to(src, (%s&)dst, name);\n}\n" % all_classes[self.bases[0].replace("::", "_")].cname
         else:
             code += "\n    return true;\n}\n"
         return code
@@ -351,9 +351,15 @@ class ConstInfo(object):
         self.name = self.name.upper()
         self.value = val
 
+def handle_ptr(tp):
+    if tp.startswith('Ptr_'):
+        tp = 'Ptr<' + "::".join(tp.split('_')[1:]) + '>'
+    return tp
+
+
 class ArgInfo(object):
     def __init__(self, arg_tuple):
-        self.tp = arg_tuple[0]
+        self.tp = handle_ptr(arg_tuple[0])
         self.name = arg_tuple[1]
         self.defval = arg_tuple[2]
         self.isarray = False
@@ -398,7 +404,7 @@ class FuncVariant(object):
             else:
                 self.wname = self.classname
 
-        self.rettype = decl[1]
+        self.rettype = handle_ptr(decl[1])
         if self.rettype == "void":
             self.rettype = ""
         self.args = []
@@ -736,6 +742,7 @@ class PythonWrapperGenerator(object):
         self.classes = {}
         self.funcs = {}
         self.consts = {}
+        self.code_include = StringIO()
         self.code_types = StringIO()
         self.code_funcs = StringIO()
         self.code_func_tab = StringIO()
@@ -754,7 +761,7 @@ class PythonWrapperGenerator(object):
             sys.exit(-1)
         self.classes[classinfo.name] = classinfo
         if classinfo.bases and not classinfo.isalgorithm:
-            classinfo.isalgorithm = self.classes[classinfo.bases[0]].isalgorithm
+            classinfo.isalgorithm = self.classes[classinfo.bases[0].replace("::", "_")].isalgorithm
 
     def add_const(self, name, decl):
         constinfo = ConstInfo(name, decl[1])
@@ -769,7 +776,7 @@ class PythonWrapperGenerator(object):
         classname = bareclassname = ""
         name = decl[0]
         dpos = name.rfind(".")
-        if dpos >= 0 and name[:dpos] != "cv":
+        if dpos >= 0 and name[:dpos] not in ["cv", "cv.ocl"]:
             classname = bareclassname = re.sub(r"^cv\.", "", name[:dpos])
             name = name[dpos+1:]
             dpos = classname.rfind(".")
@@ -778,6 +785,7 @@ class PythonWrapperGenerator(object):
                 classname = classname.replace(".", "_")
         cname = name
         name = re.sub(r"^cv\.", "", name)
+        name = name.replace(".", "_")
         isconstructor = cname == bareclassname
         cname = cname.replace(".", "::")
         isclassmethod = False
@@ -824,6 +832,9 @@ class PythonWrapperGenerator(object):
         # step 1: scan the headers and build more descriptive maps of classes, consts, functions
         for hdr in srcfiles:
             decls = parser.parse(hdr)
+            if len(decls) == 0:
+                continue
+            self.code_include.write( '#include "{}"\n'.format(hdr[hdr.rindex('opencv2/'):]) )
             for decl in decls:
                 name = decl[0]
                 if name.startswith("struct") or name.startswith("class"):
@@ -879,6 +890,7 @@ class PythonWrapperGenerator(object):
             self.gen_const_reg(constinfo)
 
         # That's it. Now save all the files
+        self.save(output_path, "pyopencv_generated_include.h", self.code_include)
         self.save(output_path, "pyopencv_generated_funcs.h", self.code_funcs)
         self.save(output_path, "pyopencv_generated_func_tab.h", self.code_func_tab)
         self.save(output_path, "pyopencv_generated_const_reg.h", self.code_const_reg)
@@ -891,6 +903,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         dstdir = sys.argv[1]
     if len(sys.argv) > 2:
-        srcfiles = sys.argv[2:]
+        srcfiles = open(sys.argv[2], 'r').read().split(';')
     generator = PythonWrapperGenerator()
     generator.gen(srcfiles, dstdir)

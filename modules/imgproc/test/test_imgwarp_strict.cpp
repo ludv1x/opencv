@@ -532,7 +532,7 @@ void CV_Resize_Test::resize_1d(const Mat& _src, Mat& _dst, int dy, const dim& _d
             ofs = 3, ksize = 8;
 
         Mat _extended_src_row(1, _src.cols + ksize * 2, _src.type());
-        uchar* srow = _src.data + dy * _src.step;
+        const uchar* srow = _src.ptr(dy);
         memcpy(_extended_src_row.data + elemsize * ksize, srow, _src.step);
         for (int k = 0; k < ksize; ++k)
         {
@@ -556,7 +556,6 @@ void CV_Resize_Test::resize_1d(const Mat& _src, Mat& _dst, int dy, const dim& _d
                 xyD[r] = 0;
                 for (int k = 0; k < ksize; ++k)
                     xyD[r] += w[k] * xyS[k * cn + r];
-                xyD[r] = xyD[r];
             }
         }
     }

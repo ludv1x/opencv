@@ -41,7 +41,7 @@
 //M*/
 
 #include "precomp.hpp"
-#include "opencl_kernels.hpp"
+#include "opencl_kernels_core.hpp"
 
 #include "bufferpool.impl.hpp"
 
@@ -346,7 +346,7 @@ static void finalizeHdr(Mat& m)
     if( d > 2 )
         m.rows = m.cols = -1;
     if(m.u)
-        m.data = m.datastart = m.u->data;
+        m.datastart = m.data = m.u->data;
     if( m.data )
     {
         m.datalimit = m.datastart + m.size[0]*m.step[0];
@@ -510,7 +510,7 @@ Mat::Mat(int _dims, const int* _sizes, int _type, void* _data, const size_t* _st
       datalimit(0), allocator(0), u(0), size(&rows)
 {
     flags |= CV_MAT_TYPE(_type);
-    data = datastart = (uchar*)_data;
+    datastart = data = (uchar*)_data;
     setSize(*this, _dims, _sizes, _steps, true);
     finalizeHdr(*this);
 }
@@ -549,7 +549,7 @@ static Mat cvMatNDToMat(const CvMatND* m, bool copyData)
 
     if( !m )
         return thiz;
-    thiz.data = thiz.datastart = m->data.ptr;
+    thiz.datastart = thiz.data = m->data.ptr;
     thiz.flags |= CV_MAT_TYPE(m->type);
     int _sizes[CV_MAX_DIM];
     size_t _steps[CV_MAX_DIM];
@@ -587,7 +587,7 @@ static Mat cvMatToMat(const CvMat* m, bool copyData)
         thiz.dims = 2;
         thiz.rows = m->rows;
         thiz.cols = m->cols;
-        thiz.data = thiz.datastart = m->data.ptr;
+        thiz.datastart = thiz.data = m->data.ptr;
         size_t esz = CV_ELEM_SIZE(m->type), minstep = thiz.cols*esz, _step = m->step;
         if( _step == 0 )
             _step = minstep;
@@ -597,7 +597,7 @@ static Mat cvMatToMat(const CvMat* m, bool copyData)
     }
     else
     {
-        thiz.data = thiz.datastart = thiz.dataend = 0;
+        thiz.datastart = thiz.dataend = thiz.data = 0;
         Mat(m->rows, m->cols, m->type, m->data.ptr, m->step).copyTo(thiz);
     }
 
@@ -636,7 +636,7 @@ static Mat iplImageToMat(const IplImage* img, bool copyData)
         m.rows = img->roi->height;
         m.cols = img->roi->width;
         esz = CV_ELEM_SIZE(m.flags);
-        m.data = m.datastart = (uchar*)img->imageData +
+        m.datastart = m.data = (uchar*)img->imageData +
             (selectedPlane ? (img->roi->coi - 1)*m.step*img->height : 0) +
             img->roi->yOffset*m.step[0] + img->roi->xOffset*esz;
     }
@@ -2051,6 +2051,23 @@ void _InputArray::copyTo(const _OutputArray& arr) const
         CV_Error(Error::StsNotImplemented, "");
 }
 
+void _InputArray::copyTo(const _OutputArray& arr, const _InputArray & mask) const
+{
+    int k = kind();
+
+    if( k == NONE )
+        arr.release();
+    else if( k == MAT || k == MATX || k == STD_VECTOR )
+    {
+        Mat m = getMat();
+        m.copyTo(arr, mask);
+    }
+    else if( k == UMAT )
+        ((UMat*)obj)->copyTo(arr, mask);
+    else
+        CV_Error(Error::StsNotImplemented, "");
+}
+
 bool _OutputArray::fixedSize() const
 {
     return (flags & FIXED_SIZE) == FIXED_SIZE;
@@ -2665,7 +2682,7 @@ void cv::hconcat(const Mat* src, size_t nsrc, OutputArray _dst)
     size_t i;
     for( i = 0; i < nsrc; i++ )
     {
-        CV_Assert( !src[i].empty() && src[i].dims <= 2 &&
+        CV_Assert( src[i].dims <= 2 &&
                    src[i].rows == src[0].rows &&
                    src[i].type() == src[0].type());
         totalCols += src[i].cols;
@@ -2705,7 +2722,7 @@ void cv::vconcat(const Mat* src, size_t nsrc, OutputArray _dst)
     size_t i;
     for( i = 0; i < nsrc; i++ )
     {
-        CV_Assert( !src[i].empty() && src[i].dims <= 2 &&
+        CV_Assert(src[i].dims <= 2 &&
                   src[i].cols == src[0].cols &&
                   src[i].type() == src[0].type());
         totalRows += src[i].rows;
@@ -2741,19 +2758,33 @@ namespace cv {
 
 static bool ocl_setIdentity( InputOutputArray _m, const Scalar& s )
 {
-    int type = _m.type(), depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type),
-            sctype = CV_MAKE_TYPE(depth, cn == 3 ? 4 : cn);
+    int type = _m.type(), depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type), kercn = cn, rowsPerWI = 1;
+    int sctype = CV_MAKE_TYPE(depth, cn == 3 ? 4 : cn);
+    if (ocl::Device::getDefault().isIntel())
+    {
+        rowsPerWI = 4;
+        if (cn == 1)
+        {
+            kercn = std::min(ocl::predictOptimalVectorWidth(_m), 4);
+            if (kercn != 4)
+                kercn = 1;
+        }
+    }
 
     ocl::Kernel k("setIdentity", ocl::core::set_identity_oclsrc,
-                  format("-D T=%s -D T1=%s -D cn=%d -D ST=%s", ocl::memopTypeToStr(type),
-                         ocl::memopTypeToStr(depth), cn, ocl::memopTypeToStr(sctype)));
+                  format("-D T=%s -D T1=%s -D cn=%d -D ST=%s -D kercn=%d -D rowsPerWI=%d",
+                         ocl::memopTypeToStr(CV_MAKE_TYPE(depth, kercn)),
+                         ocl::memopTypeToStr(depth), cn,
+                         ocl::memopTypeToStr(sctype),
+                         kercn, rowsPerWI));
     if (k.empty())
         return false;
 
     UMat m = _m.getUMat();
-    k.args(ocl::KernelArg::WriteOnly(m), ocl::KernelArg::Constant(Mat(1, 1, sctype, s)));
+    k.args(ocl::KernelArg::WriteOnly(m, cn, kercn),
+           ocl::KernelArg::Constant(Mat(1, 1, sctype, s)));
 
-    size_t globalsize[2] = { m.cols, m.rows };
+    size_t globalsize[2] = { m.cols * cn / kercn, (m.rows + rowsPerWI - 1) / rowsPerWI };
     return k.run(2, globalsize, NULL, false);
 }
 
@@ -2954,8 +2985,10 @@ static inline int divUp(int a, int b)
 
 static bool ocl_transpose( InputArray _src, OutputArray _dst )
 {
+    const ocl::Device & dev = ocl::Device::getDefault();
     const int TILE_DIM = 32, BLOCK_ROWS = 8;
-    int type = _src.type(), cn = CV_MAT_CN(type), depth = CV_MAT_DEPTH(type);
+    int type = _src.type(), cn = CV_MAT_CN(type), depth = CV_MAT_DEPTH(type),
+        rowsPerWI = dev.isIntel() ? 4 : 1;
 
     UMat src = _src.getUMat();
     _dst.create(src.cols, src.rows, type);
@@ -2971,9 +3004,9 @@ static bool ocl_transpose( InputArray _src, OutputArray _dst )
     }
 
     ocl::Kernel k(kernelName.c_str(), ocl::core::transpose_oclsrc,
-                  format("-D T=%s -D T1=%s -D cn=%d -D TILE_DIM=%d -D BLOCK_ROWS=%d",
+                  format("-D T=%s -D T1=%s -D cn=%d -D TILE_DIM=%d -D BLOCK_ROWS=%d -D rowsPerWI=%d",
                          ocl::memopTypeToStr(type), ocl::memopTypeToStr(depth),
-                         cn, TILE_DIM, BLOCK_ROWS));
+                         cn, TILE_DIM, BLOCK_ROWS, rowsPerWI));
     if (k.empty())
         return false;
 
@@ -2983,8 +3016,14 @@ static bool ocl_transpose( InputArray _src, OutputArray _dst )
         k.args(ocl::KernelArg::ReadOnly(src),
                ocl::KernelArg::WriteOnlyNoSize(dst));
 
-    size_t localsize[3]  = { TILE_DIM, BLOCK_ROWS, 1 };
-    size_t globalsize[3] = { src.cols, inplace ? src.rows : divUp(src.rows, TILE_DIM) * BLOCK_ROWS, 1 };
+    size_t localsize[2]  = { TILE_DIM, BLOCK_ROWS };
+    size_t globalsize[2] = { src.cols, inplace ? (src.rows + rowsPerWI - 1) / rowsPerWI : (divUp(src.rows, TILE_DIM) * BLOCK_ROWS) };
+
+    if (inplace && dev.isIntel())
+    {
+        localsize[0] = 16;
+        localsize[1] = dev.maxWorkGroupSize() / localsize[0];
+    }
 
     return k.run(2, globalsize, localsize, false);
 }
@@ -3019,29 +3058,63 @@ void cv::transpose( InputArray _src, OutputArray _dst )
         return;
     }
 
-#if defined(HAVE_IPP) && !defined(HAVE_IPP_ICV_ONLY)
+#if defined HAVE_IPP
     typedef IppStatus (CV_STDCALL * ippiTranspose)(const void * pSrc, int srcStep, void * pDst, int dstStep, IppiSize roiSize);
-    ippiTranspose ippFunc =
-    type == CV_8UC1 ? (ippiTranspose)ippiTranspose_8u_C1R :
-    type == CV_8UC3 ? (ippiTranspose)ippiTranspose_8u_C3R :
-    type == CV_8UC4 ? (ippiTranspose)ippiTranspose_8u_C4R :
-    type == CV_16UC1 ? (ippiTranspose)ippiTranspose_16u_C1R :
-    type == CV_16UC3 ? (ippiTranspose)ippiTranspose_16u_C3R :
-    type == CV_16UC4 ? (ippiTranspose)ippiTranspose_16u_C4R :
-    type == CV_16SC1 ? (ippiTranspose)ippiTranspose_16s_C1R :
-    type == CV_16SC3 ? (ippiTranspose)ippiTranspose_16s_C3R :
-    type == CV_16SC4 ? (ippiTranspose)ippiTranspose_16s_C4R :
-    type == CV_32SC1 ? (ippiTranspose)ippiTranspose_32s_C1R :
-    type == CV_32SC3 ? (ippiTranspose)ippiTranspose_32s_C3R :
-    type == CV_32SC4 ? (ippiTranspose)ippiTranspose_32s_C4R :
-    type == CV_32FC1 ? (ippiTranspose)ippiTranspose_32f_C1R :
-    type == CV_32FC3 ? (ippiTranspose)ippiTranspose_32f_C3R :
-    type == CV_32FC4 ? (ippiTranspose)ippiTranspose_32f_C4R : 0;
+    typedef IppStatus (CV_STDCALL * ippiTransposeI)(const void * pSrcDst, int srcDstStep, IppiSize roiSize);
+    ippiTranspose ippFunc = 0;
+    ippiTransposeI ippFuncI = 0;
+
+    if (dst.data == src.data && dst.cols == dst.rows)
+    {
+        CV_SUPPRESS_DEPRECATED_START
+        ippFuncI =
+            type == CV_8UC1 ? (ippiTransposeI)ippiTranspose_8u_C1IR :
+            type == CV_8UC3 ? (ippiTransposeI)ippiTranspose_8u_C3IR :
+            type == CV_8UC4 ? (ippiTransposeI)ippiTranspose_8u_C4IR :
+            type == CV_16UC1 ? (ippiTransposeI)ippiTranspose_16u_C1IR :
+            type == CV_16UC3 ? (ippiTransposeI)ippiTranspose_16u_C3IR :
+            type == CV_16UC4 ? (ippiTransposeI)ippiTranspose_16u_C4IR :
+            type == CV_16SC1 ? (ippiTransposeI)ippiTranspose_16s_C1IR :
+            type == CV_16SC3 ? (ippiTransposeI)ippiTranspose_16s_C3IR :
+            type == CV_16SC4 ? (ippiTransposeI)ippiTranspose_16s_C4IR :
+            type == CV_32SC1 ? (ippiTransposeI)ippiTranspose_32s_C1IR :
+            type == CV_32SC3 ? (ippiTransposeI)ippiTranspose_32s_C3IR :
+            type == CV_32SC4 ? (ippiTransposeI)ippiTranspose_32s_C4IR :
+            type == CV_32FC1 ? (ippiTransposeI)ippiTranspose_32f_C1IR :
+            type == CV_32FC3 ? (ippiTransposeI)ippiTranspose_32f_C3IR :
+            type == CV_32FC4 ? (ippiTransposeI)ippiTranspose_32f_C4IR : 0;
+        CV_SUPPRESS_DEPRECATED_END
+    }
+    else
+    {
+        ippFunc =
+            type == CV_8UC1 ? (ippiTranspose)ippiTranspose_8u_C1R :
+            type == CV_8UC3 ? (ippiTranspose)ippiTranspose_8u_C3R :
+            type == CV_8UC4 ? (ippiTranspose)ippiTranspose_8u_C4R :
+            type == CV_16UC1 ? (ippiTranspose)ippiTranspose_16u_C1R :
+            type == CV_16UC3 ? (ippiTranspose)ippiTranspose_16u_C3R :
+            type == CV_16UC4 ? (ippiTranspose)ippiTranspose_16u_C4R :
+            type == CV_16SC1 ? (ippiTranspose)ippiTranspose_16s_C1R :
+            type == CV_16SC3 ? (ippiTranspose)ippiTranspose_16s_C3R :
+            type == CV_16SC4 ? (ippiTranspose)ippiTranspose_16s_C4R :
+            type == CV_32SC1 ? (ippiTranspose)ippiTranspose_32s_C1R :
+            type == CV_32SC3 ? (ippiTranspose)ippiTranspose_32s_C3R :
+            type == CV_32SC4 ? (ippiTranspose)ippiTranspose_32s_C4R :
+            type == CV_32FC1 ? (ippiTranspose)ippiTranspose_32f_C1R :
+            type == CV_32FC3 ? (ippiTranspose)ippiTranspose_32f_C3R :
+            type == CV_32FC4 ? (ippiTranspose)ippiTranspose_32f_C4R : 0;
+    }
 
     IppiSize roiSize = { src.cols, src.rows };
     if (ippFunc != 0)
     {
         if (ippFunc(src.data, (int)src.step, dst.data, (int)dst.step, roiSize) >= 0)
+            return;
+        setIppErrorStatus();
+    }
+    else if (ippFuncI != 0)
+    {
+        if (ippFuncI(dst.data, (int)dst.step, roiSize) >= 0)
             return;
         setIppErrorStatus();
     }
@@ -3234,7 +3307,7 @@ typedef void (*ReduceFunc)( const Mat& src, Mat& dst );
 #define reduceMinR32f reduceR_<float, float, OpMin<float> >
 #define reduceMinR64f reduceR_<double,double,OpMin<double> >
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 
 static inline void reduceSumC_8u16u16s32f_64f(const cv::Mat& srcmat, cv::Mat& dstmat)
 {
@@ -3266,7 +3339,7 @@ static inline void reduceSumC_8u16u16s32f_64f(const cv::Mat& srcmat, cv::Mat& ds
             stype == CV_32FC3 ? (ippiSumHint)ippiSum_32f_C3R :
             stype == CV_32FC4 ? (ippiSumHint)ippiSum_32f_C4R : 0;
         func =
-        sdepth == CV_8U ? (cv::ReduceFunc)cv::reduceC_<uchar, double,   cv::OpAdd<double> > :
+            sdepth == CV_8U ? (cv::ReduceFunc)cv::reduceC_<uchar, double,   cv::OpAdd<double> > :
             sdepth == CV_16U ? (cv::ReduceFunc)cv::reduceC_<ushort, double,   cv::OpAdd<double> > :
             sdepth == CV_16S ? (cv::ReduceFunc)cv::reduceC_<short, double,   cv::OpAdd<double> > :
             sdepth == CV_32F ? (cv::ReduceFunc)cv::reduceC_<float, double,   cv::OpAdd<double> > : 0;
@@ -3308,7 +3381,7 @@ static inline void reduceSumC_8u16u16s32f_64f(const cv::Mat& srcmat, cv::Mat& ds
 #define reduceSumC32f32f reduceC_<float, float, OpAdd<float> >
 #define reduceSumC64f64f reduceC_<double,double,OpAdd<double> >
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 #define reduceSumC8u64f  reduceSumC_8u16u16s32f_64f
 #define reduceSumC16u64f reduceSumC_8u16u16s32f_64f
 #define reduceSumC16s64f reduceSumC_8u16u16s32f_64f
@@ -3320,7 +3393,7 @@ static inline void reduceSumC_8u16u16s32f_64f(const cv::Mat& srcmat, cv::Mat& ds
 #define reduceSumC32f64f reduceC_<float, double,OpAdd<double> >
 #endif
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 #define REDUCE_OP(favor, optype, type1, type2) \
 static inline void reduce##optype##C##favor(const cv::Mat& srcmat, cv::Mat& dstmat) \
 { \
@@ -3344,7 +3417,7 @@ static inline void reduce##optype##C##favor(const cv::Mat& srcmat, cv::Mat& dstm
 }
 #endif
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 REDUCE_OP(8u, Max, uchar, uchar)
 REDUCE_OP(16u, Max, ushort, ushort)
 REDUCE_OP(16s, Max, short, short)
@@ -3357,7 +3430,7 @@ REDUCE_OP(32f, Max, float, float)
 #endif
 #define reduceMaxC64f reduceC_<double,double,OpMax<double> >
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 REDUCE_OP(8u, Min, uchar, uchar)
 REDUCE_OP(16u, Min, ushort, ushort)
 REDUCE_OP(16s, Min, short, short)
@@ -3377,50 +3450,103 @@ namespace cv {
 static bool ocl_reduce(InputArray _src, OutputArray _dst,
                        int dim, int op, int op0, int stype, int dtype)
 {
+    const int min_opt_cols = 128, buf_cols = 32;
     int sdepth = CV_MAT_DEPTH(stype), cn = CV_MAT_CN(stype),
             ddepth = CV_MAT_DEPTH(dtype), ddepth0 = ddepth;
-    bool doubleSupport = ocl::Device::getDefault().doubleFPConfig() > 0;
+    const ocl::Device &defDev = ocl::Device::getDefault();
+    bool doubleSupport = defDev.doubleFPConfig() > 0;
+
+    size_t wgs = defDev.maxWorkGroupSize();
+    bool useOptimized = 1 == dim && _src.cols() > min_opt_cols && (wgs >= buf_cols);
 
     if (!doubleSupport && (sdepth == CV_64F || ddepth == CV_64F))
         return false;
 
+    if ((op == CV_REDUCE_SUM && sdepth == CV_32F) || op == CV_REDUCE_MIN || op == CV_REDUCE_MAX)
+        return false;
+
     if (op == CV_REDUCE_AVG)
     {
-        op = CV_REDUCE_SUM;
         if (sdepth < CV_32S && ddepth < CV_32S)
             ddepth = CV_32S;
     }
 
     const char * const ops[4] = { "OCL_CV_REDUCE_SUM", "OCL_CV_REDUCE_AVG",
                                   "OCL_CV_REDUCE_MAX", "OCL_CV_REDUCE_MIN" };
-    char cvt[40];
-    ocl::Kernel k("reduce", ocl::core::reduce2_oclsrc,
-                  format("-D %s -D dim=%d -D cn=%d -D ddepth=%d -D srcT=%s -D dstT=%s -D convertToDT=%s%s",
-                         ops[op], dim, cn, ddepth, ocl::typeToStr(sdepth), ocl::typeToStr(ddepth),
-                         ocl::convertTypeStr(sdepth, ddepth, 1, cvt),
-                         doubleSupport ? " -D DOUBLE_SUPPORT" : ""));
-    if (k.empty())
-        return false;
+    int wdepth = std::max(ddepth, CV_32F);
+    if (useOptimized)
+    {
+        size_t tileHeight = (size_t)(wgs / buf_cols);
+        if (defDev.isIntel())
+        {
+            static const size_t maxItemInGroupCount = 16;
+            tileHeight = min(tileHeight, defDev.localMemSize() / buf_cols / CV_ELEM_SIZE(CV_MAKETYPE(wdepth, cn)) / maxItemInGroupCount);
+        }
+        char cvt[3][40];
+        cv::String build_opt = format("-D OP_REDUCE_PRE -D BUF_COLS=%d -D TILE_HEIGHT=%d -D %s -D dim=1"
+                                            " -D cn=%d -D ddepth=%d"
+                                            " -D srcT=%s -D bufT=%s -D dstT=%s"
+                                            " -D convertToWT=%s -D convertToBufT=%s -D convertToDT=%s%s",
+                                            buf_cols, tileHeight, ops[op], cn, ddepth,
+                                            ocl::typeToStr(sdepth),
+                                            ocl::typeToStr(ddepth),
+                                            ocl::typeToStr(ddepth0),
+                                            ocl::convertTypeStr(ddepth, wdepth, 1, cvt[0]),
+                                            ocl::convertTypeStr(sdepth, ddepth, 1, cvt[1]),
+                                            ocl::convertTypeStr(wdepth, ddepth0, 1, cvt[2]),
+                                            doubleSupport ? " -D DOUBLE_SUPPORT" : "");
+        ocl::Kernel k("reduce_horz_opt", ocl::core::reduce2_oclsrc, build_opt);
+        if (k.empty())
+            return false;
+        UMat src = _src.getUMat();
+        Size dsize(1, src.rows);
+        _dst.create(dsize, dtype);
+        UMat dst = _dst.getUMat();
 
-    UMat src = _src.getUMat();
-    Size dsize(dim == 0 ? src.cols : 1, dim == 0 ? 1 : src.rows);
-    _dst.create(dsize, dtype);
-    UMat dst = _dst.getUMat(), temp = dst;
+        if (op0 == CV_REDUCE_AVG)
+            k.args(ocl::KernelArg::ReadOnly(src),
+                      ocl::KernelArg::WriteOnlyNoSize(dst), 1.0f / src.cols);
+        else
+            k.args(ocl::KernelArg::ReadOnly(src),
+                      ocl::KernelArg::WriteOnlyNoSize(dst));
 
-    if (op0 == CV_REDUCE_AVG && sdepth < CV_32S && ddepth0 < CV_32S)
-        temp.create(dsize, CV_32SC(cn));
+        size_t localSize[2] = { buf_cols, tileHeight};
+        size_t globalSize[2] = { buf_cols, src.rows };
+        return k.run(2, globalSize, localSize, false);
+    }
+    else
+    {
+        char cvt[2][40];
+        cv::String build_opt = format("-D %s -D dim=%d -D cn=%d -D ddepth=%d"
+                                      " -D srcT=%s -D dstT=%s -D dstT0=%s -D convertToWT=%s"
+                                      " -D convertToDT=%s -D convertToDT0=%s%s",
+                                      ops[op], dim, cn, ddepth, ocl::typeToStr(useOptimized ? ddepth : sdepth),
+                                      ocl::typeToStr(ddepth), ocl::typeToStr(ddepth0),
+                                      ocl::convertTypeStr(ddepth, wdepth, 1, cvt[0]),
+                                      ocl::convertTypeStr(sdepth, ddepth, 1, cvt[0]),
+                                      ocl::convertTypeStr(wdepth, ddepth0, 1, cvt[1]),
+                                      doubleSupport ? " -D DOUBLE_SUPPORT" : "");
 
-    size_t globalsize = std::max(dsize.width, dsize.height);
+        ocl::Kernel k("reduce", ocl::core::reduce2_oclsrc, build_opt);
+        if (k.empty())
+            return false;
 
-    k.args(ocl::KernelArg::ReadOnly(src),
-           ocl::KernelArg::WriteOnlyNoSize(temp));
-    if (!k.run(1, &globalsize, NULL, false))
-        return false;
+        UMat src = _src.getUMat();
+        Size dsize(dim == 0 ? src.cols : 1, dim == 0 ? 1 : src.rows);
+        _dst.create(dsize, dtype);
+        UMat dst = _dst.getUMat();
 
-    if (op0 == CV_REDUCE_AVG)
-        temp.convertTo(dst, ddepth0, 1. / (dim == 0 ? src.rows : src.cols));
+        ocl::KernelArg srcarg = ocl::KernelArg::ReadOnly(src),
+                temparg = ocl::KernelArg::WriteOnlyNoSize(dst);
 
-    return true;
+        if (op0 == CV_REDUCE_AVG)
+            k.args(srcarg, temparg, 1.0f / (dim == 0 ? src.rows : src.cols));
+        else
+            k.args(srcarg, temparg);
+
+        size_t globalsize = std::max(dsize.width, dsize.height);
+        return k.run(1, &globalsize, NULL, false);
+    }
 }
 
 }
@@ -3580,28 +3706,28 @@ void cv::reduce(InputArray _src, OutputArray _dst, int dim, int op, int dtype)
 namespace cv
 {
 
-#if IPP_VERSION_X100 > 0 && !defined HAVE_IPP_ICV_ONLY
+#if IPP_VERSION_X100 > 0
 #define USE_IPP_SORT
 
-typedef IppStatus (CV_STDCALL *IppSortFunc)(void *, int);
+typedef IppStatus (CV_STDCALL * IppSortFunc)(void *, int);
 typedef IppSortFunc IppFlipFunc;
 
 static IppSortFunc getSortFunc(int depth, bool sortDescending)
 {
     if (!sortDescending)
         return depth == CV_8U ? (IppSortFunc)ippsSortAscend_8u_I :
-            depth == CV_16U ? (IppSortFunc)ippsSortAscend_16u_I :
+            /*depth == CV_16U ? (IppSortFunc)ippsSortAscend_16u_I :
             depth == CV_16S ? (IppSortFunc)ippsSortAscend_16s_I :
             depth == CV_32S ? (IppSortFunc)ippsSortAscend_32s_I :
             depth == CV_32F ? (IppSortFunc)ippsSortAscend_32f_I :
-            depth == CV_64F ? (IppSortFunc)ippsSortAscend_64f_I : 0;
+            depth == CV_64F ? (IppSortFunc)ippsSortAscend_64f_I :*/ 0;
     else
         return depth == CV_8U ? (IppSortFunc)ippsSortDescend_8u_I :
-            depth == CV_16U ? (IppSortFunc)ippsSortDescend_16u_I :
+            /*depth == CV_16U ? (IppSortFunc)ippsSortDescend_16u_I :
             depth == CV_16S ? (IppSortFunc)ippsSortDescend_16s_I :
             depth == CV_32S ? (IppSortFunc)ippsSortDescend_32s_I :
             depth == CV_32F ? (IppSortFunc)ippsSortDescend_32f_I :
-            depth == CV_64F ? (IppSortFunc)ippsSortDescend_64f_I : 0;
+            depth == CV_64F ? (IppSortFunc)ippsSortDescend_64f_I :*/ 0;
 }
 
 static IppFlipFunc getFlipFunc(int depth)
@@ -3666,7 +3792,8 @@ template<typename T> static void sort_( const Mat& src, Mat& dst, int flags )
 #endif
         {
 #ifdef USE_IPP_SORT
-            setIppErrorStatus();
+            if (depth == CV_8U)
+                setIppErrorStatus();
 #endif
             std::sort( ptr, ptr + len );
             if( sortDescending )
@@ -3698,7 +3825,7 @@ public:
     const _Tp* arr;
 };
 
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
 
 typedef IppStatus (CV_STDCALL *IppSortIndexFunc)(void *, int *, int);
 
@@ -3745,7 +3872,7 @@ template<typename T> static void sortIdx_( const Mat& src, Mat& dst, int flags )
     bptr = (T*)buf;
     _iptr = (int*)ibuf;
 
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
     int depth = src.depth();
     IppSortIndexFunc ippFunc = getSortIndexFunc(depth, sortDescending);
     IppFlipFunc ippFlipFunc = getFlipFunc(depth);
@@ -3769,21 +3896,21 @@ template<typename T> static void sortIdx_( const Mat& src, Mat& dst, int flags )
         for( j = 0; j < len; j++ )
             iptr[j] = j;
 
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
         if (sortRows || !ippFunc || ippFunc(ptr, iptr, len) < 0)
 #endif
         {
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
             setIppErrorStatus();
 #endif
             std::sort( iptr, iptr + len, LessThanIdx<T>(ptr) );
             if( sortDescending )
             {
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
                 if (!ippFlipFunc || ippFlipFunc(iptr, len) < 0)
 #endif
                 {
-#ifdef USE_IPP_SORT
+#if defined USE_IPP_SORT && 0
                     setIppErrorStatus();
 #endif
                     for( j = 0; j < len/2; j++ )
@@ -4015,15 +4142,17 @@ double cv::kmeans( InputArray _data, int K,
                    int flags, OutputArray _centers )
 {
     const int SPP_TRIALS = 3;
-    Mat data = _data.getMat();
-    bool isrow = data.rows == 1 && data.channels() > 1;
-    int N = !isrow ? data.rows : data.cols;
-    int dims = (!isrow ? data.cols : 1)*data.channels();
-    int type = data.depth();
+    Mat data0 = _data.getMat();
+    bool isrow = data0.rows == 1 && data0.channels() > 1;
+    int N = !isrow ? data0.rows : data0.cols;
+    int dims = (!isrow ? data0.cols : 1)*data0.channels();
+    int type = data0.depth();
 
     attempts = std::max(attempts, 1);
-    CV_Assert( data.dims <= 2 && type == CV_32F && K > 0 );
+    CV_Assert( data0.dims <= 2 && type == CV_32F && K > 0 );
     CV_Assert( N >= K );
+
+    Mat data(N, dims, CV_32F, data0.data, isrow ? dims * sizeof(float) : static_cast<size_t>(data0.step));
 
     _bestLabels.create(N, 1, CV_32S, -1, true);
 
@@ -5403,14 +5532,14 @@ double norm( const SparseMat& src, int normType )
     {
         if( normType == NORM_INF )
             for( i = 0; i < N; i++, ++it )
-                result = std::max(result, std::abs((double)*(const float*)it.ptr));
+                result = std::max(result, std::abs((double)it.value<float>()));
         else if( normType == NORM_L1 )
             for( i = 0; i < N; i++, ++it )
-                result += std::abs(*(const float*)it.ptr);
+                result += std::abs(it.value<float>());
         else
             for( i = 0; i < N; i++, ++it )
             {
-                double v = *(const float*)it.ptr;
+                double v = it.value<float>();
                 result += v*v;
             }
     }
@@ -5418,14 +5547,14 @@ double norm( const SparseMat& src, int normType )
     {
         if( normType == NORM_INF )
             for( i = 0; i < N; i++, ++it )
-                result = std::max(result, std::abs(*(const double*)it.ptr));
+                result = std::max(result, std::abs(it.value<double>()));
         else if( normType == NORM_L1 )
             for( i = 0; i < N; i++, ++it )
-                result += std::abs(*(const double*)it.ptr);
+                result += std::abs(it.value<double>());
         else
             for( i = 0; i < N; i++, ++it )
             {
-                double v = *(const double*)it.ptr;
+                double v = it.value<double>();
                 result += v*v;
             }
     }
@@ -5449,7 +5578,7 @@ void minMaxLoc( const SparseMat& src, double* _minval, double* _maxval, int* _mi
         float minval = FLT_MAX, maxval = -FLT_MAX;
         for( i = 0; i < N; i++, ++it )
         {
-            float v = *(const float*)it.ptr;
+            float v = it.value<float>();
             if( v < minval )
             {
                 minval = v;
@@ -5471,7 +5600,7 @@ void minMaxLoc( const SparseMat& src, double* _minval, double* _maxval, int* _mi
         double minval = DBL_MAX, maxval = -DBL_MAX;
         for( i = 0; i < N; i++, ++it )
         {
-            double v = *(const double*)it.ptr;
+            double v = it.value<double>();
             if( v < minval )
             {
                 minval = v;
