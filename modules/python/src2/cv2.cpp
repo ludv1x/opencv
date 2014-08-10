@@ -29,6 +29,8 @@
 #  include "opencv2/nonfree.hpp"
 #endif
 
+#include "opencv2/edge_filter.hpp"
+
 #include "pycompat.hpp"
 
 using cv::flann::IndexParams;
@@ -167,6 +169,9 @@ typedef Ptr<flann::SearchParams> Ptr_flann_SearchParams;
 
 typedef Ptr<FaceRecognizer> Ptr_FaceRecognizer;
 typedef std::vector<Scalar> vector_Scalar;
+
+typedef Ptr<AdaptiveManifoldFilter> Ptr_AdaptiveManifoldFilter;
+typedef Ptr<DTFilterBase> Ptr_DTFilterBase;
 
 static PyObject* failmsgp(const char *fmt, ...)
 {
